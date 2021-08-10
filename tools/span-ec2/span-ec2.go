@@ -70,9 +70,29 @@ func main() {
 	// prepare ansible config (tmp list of hosts to create)
 	fmt.Printf("Preparing config for %s\n", config.Instances[chosenAmiNumber].Name)
 
+	newConfig := Config{}
+	newConfig.Instances = append(newConfig.Instances, config.Instances[chosenAmiNumber])
+	newConfigByte, err := yaml.Marshal(newConfig)
+	if err != nil{
+		panic(err)
+	}
+	err = ioutil.WriteFile("./instances,yml", newConfigByte, 0644)
+	if err != nil{
+		panic(err)
+	}
 
 	// execute ansible
 	fmt.Printf("Executing Ansible for %s\n", config.Instances[chosenAmiNumber].Name)
+
+	//cmd := exec.Command("ansible-playbook", "release.yml", "--extra-vars", "@")
+	//cmd.Stdin = strings.NewReader("some input")
+	//var out bytes.Buffer
+	//cmd.Stdout = &out
+	//err := cmd.Run()
+	//if err != nil {
+	//	log.Fatal(err)
+	//}
+	//fmt.Printf("in all caps: %q\n", out.String())
 
 }
 
