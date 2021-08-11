@@ -7,11 +7,12 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 )
 
 const instancesFile = "../../test/automated/ansible/group_vars/localhost/main.yml"
 
-type Config struct {
+type AnsibleGroupVars struct {
 	Instances []instanceDef `yaml:"instances"`
 }
 
@@ -30,17 +31,16 @@ func main() {
 		log.Fatal(err.Error())
 	}
 
-	config := Config{}
-	err = yaml.Unmarshal(yamlFile, &config)
+	options, err := generateOptions(yamlFile)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
 
-	optionFormat := "[%2d] %25s"
-
-	fmt.Printf("Choose AMI to create\n\n")
-	for i, instance := range config.Instances{
-		fmt.Println(fmt.Sprintf(optionFormat,i, instance.Name))
+	for i := 0; i < len(options)/2+1; i++ {
+		fmt.Print(options[i].name)
+		if _, ok := options[i+len(options)/2]; ok {
+			fmt.Printf("        %s\n", options[i+len(options)/2].name)
+		}
 	}
 
 	fmt.Print("Select one of numbers: ")
@@ -52,37 +52,37 @@ func main() {
 
 	chosenAmiNumber, err := strconv.Atoi(userInput)
 
-	if err != nil{
+	if err != nil {
 		panic(err)
 	}
 
 	// validate input
 
 	// confirm
-	fmt.Printf("Chosen AMI %d - %s\nIs this right [(y)es/(n)o]: ", chosenAmiNumber, config.Instances[chosenAmiNumber].Name)
+	fmt.Printf("Chosen AMI %d - %s\nIs this right [(y)es/(n)o]: ", chosenAmiNumber, options[chosenAmiNumber].name)
 
 	fmt.Scanln(&userInput)
 
-	if userInput != "yes" && userInput != "y"{
+	if userInput != "yes" && userInput != "y" {
 		os.Exit(0)
 	}
 
 	// prepare ansible config (tmp list of hosts to create)
-	fmt.Printf("Preparing config for %s\n", config.Instances[chosenAmiNumber].Name)
+	fmt.Printf("Preparing config for %s\n", options[chosenAmiNumber].name)
 
-	newConfig := Config{}
-	newConfig.Instances = append(newConfig.Instances, config.Instances[chosenAmiNumber])
+	newConfig := AnsibleGroupVars{}
+	newConfig.Instances = append(newConfig.Instances, options[chosenAmiNumber].instance)
 	newConfigByte, err := yaml.Marshal(newConfig)
-	if err != nil{
+	if err != nil {
 		panic(err)
 	}
-	err = ioutil.WriteFile("./instances,yml", newConfigByte, 0644)
-	if err != nil{
+	err = ioutil.WriteFile("./instances.yml", newConfigByte, 0644)
+	if err != nil {
 		panic(err)
 	}
 
 	// execute ansible
-	fmt.Printf("Executing Ansible for %s\n", config.Instances[chosenAmiNumber].Name)
+	fmt.Printf("Executing Ansible for %s\n", options[chosenAmiNumber].name)
 
 	//cmd := exec.Command("ansible-playbook", "release.yml", "--extra-vars", "@")
 	//cmd.Stdin = strings.NewReader("some input")
@@ -96,4 +96,51 @@ func main() {
 
 }
 
+type option struct {
+	id       int
+	name     string
+	arch     string
+	os       string
+	instance instanceDef
+}
 
+type options map[int]option
+
+func generateOptions(yamlContent []byte) (options, error) {
+
+	options := options{}
+
+	groupVars := AnsibleGroupVars{}
+	err := yaml.Unmarshal(yamlContent, &groupVars)
+	if err != nil {
+		log.Fatal(err.Error())
+	}
+
+	optionFormat := "[%2d] %s%6s%s %18s"
+
+	colorGreen := "\033[32m"
+	colorBlue := "\033[34m"
+	colorReset := "\033[0m"
+
+	for i, instance := range groupVars.Instances {
+
+		arch := instance.Name[:strings.Index(instance.Name, ":")]
+		operationSystem := instance.Name[strings.Index(instance.Name, ":")+1:]
+
+		osColor := colorGreen
+
+		if arch == "amd64" {
+			osColor = colorBlue
+		}
+
+		options[i] = option{
+			id:       i,
+			arch:     arch,
+			os:       operationSystem,
+			name:     fmt.Sprintf(optionFormat, i, osColor, arch, colorReset, operationSystem),
+			instance: instance,
+		}
+	}
+
+	return options, nil
+}
