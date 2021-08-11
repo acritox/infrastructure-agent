@@ -1,19 +1,28 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"gopkg.in/yaml.v2"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"os"
+	"os/exec"
+	"os/user"
+	"path"
 	"strconv"
 	"strings"
+	"time"
 )
 
-const instancesFile = "../../test/automated/ansible/group_vars/localhost/main.yml"
+//const instancesFile = "../../test/automated/ansible/group_vars/localhost/main.yml"
+const instancesFile = "/Users/rruizdegauna/src/nr-pub/infrastructure-agent/test/automated/ansible/group_vars/localhost/main.yml"
+const inventory = "test/automated/ansible/custom-instances.yml"
 
 type AnsibleGroupVars struct {
-	Instances []instanceDef `yaml:"instances"`
+	ProvisionHostPrefix string        `yaml:"provision_host_prefix"`
+	Instances           []instanceDef `yaml:"instances"`
 }
 
 type instanceDef struct {
@@ -25,30 +34,39 @@ type instanceDef struct {
 	LaunchTemplate    string `yaml:"launch_template"`
 }
 
+var letterRunes = []rune("abcdefghijklmnopqrstuvwxyz")
+
 func main() {
+	rand.Seed(time.Now().UnixNano())
+
 	yamlFile, err := ioutil.ReadFile(instancesFile)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
 
-	options, err := generateOptions(yamlFile)
+	opts, err := generateOptions(yamlFile)
 	if err != nil {
 		log.Fatal(err.Error())
 	}
 
-	for i := 0; i < len(options)/2+1; i++ {
-		fmt.Print(options[i].name)
-		if _, ok := options[i+len(options)/2]; ok {
-			fmt.Printf("        %s\n", options[i+len(options)/2].name)
+	for i := 0; i < len(opts)/2+1; i++ {
+		fmt.Print(opts[i].name)
+		if _, ok := opts[i+len(opts)/2]; ok {
+			fmt.Printf("        %s\n", opts[i+len(opts)/2].name)
 		}
 	}
 
-	fmt.Print("Select one of numbers: ")
+	fmt.Print("Select one of numbers (or q to quit): ")
 
 	// get user input
 	var userInput string
 
 	fmt.Scanln(&userInput)
+
+	if userInput == "q" {
+		fmt.Println("Have a nice day!")
+		os.Exit(0)
+	}
 
 	chosenAmiNumber, err := strconv.Atoi(userInput)
 
@@ -56,44 +74,90 @@ func main() {
 		panic(err)
 	}
 
+	// request for prefix
+	provisionHostPrefix := randStringRunes(4)
+	fmt.Printf("Enter a prefix for the boxes (empty for random): [%s] ", provisionHostPrefix)
+	userInput = ""
+	fmt.Scanln(&userInput)
+	if userInput != "" {
+		provisionHostPrefix = userInput
+	}
+	user, err := user.Current()
+	if err != nil {
+		log.Fatalf(err.Error())
+	}
+	username := user.Username
+	hostname, err := os.Hostname()
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	provisionHostPrefix = fmt.Sprintf("%s-%s-%s", username, hostname, provisionHostPrefix)
 	// validate input
 
 	// confirm
-	fmt.Printf("Chosen AMI %d - %s\nIs this right [(y)es/(n)o]: ", chosenAmiNumber, options[chosenAmiNumber].name)
-
+	fmt.Printf("Chosen AMI\n")
+	fmt.Printf("Os: %s\n", opts[chosenAmiNumber].os)
+	fmt.Printf("Arch: %s\n", opts[chosenAmiNumber].arch)
+	fmt.Printf("Prefix: %s\n", provisionHostPrefix)
+	fmt.Printf("\n")
+	fmt.Printf("Is this right [(y)es / (n)o / (q)uit]: ")
+	userInput = ""
 	fmt.Scanln(&userInput)
 
-	if userInput != "yes" && userInput != "y" {
+	if (userInput != "yes" && userInput != "y") || userInput == "q" {
 		os.Exit(0)
 	}
 
 	// prepare ansible config (tmp list of hosts to create)
-	fmt.Printf("Preparing config for %s\n", options[chosenAmiNumber].name)
+	fmt.Printf("Preparing config for %s\n", opts[chosenAmiNumber].name)
 
 	newConfig := AnsibleGroupVars{}
-	newConfig.Instances = append(newConfig.Instances, options[chosenAmiNumber].instance)
+	newConfig.ProvisionHostPrefix = provisionHostPrefix
+	newConfig.Instances = append(newConfig.Instances, opts[chosenAmiNumber].instance)
 	newConfigByte, err := yaml.Marshal(newConfig)
 	if err != nil {
 		panic(err)
 	}
-	err = ioutil.WriteFile("./instances.yml", newConfigByte, 0644)
+	err = ioutil.WriteFile(inventory, newConfigByte, 0644)
 	if err != nil {
 		panic(err)
 	}
 
 	// execute ansible
-	fmt.Printf("Executing Ansible for %s\n", options[chosenAmiNumber].name)
+	fmt.Printf("Executing Ansible for %s\n", opts[chosenAmiNumber].name)
 
-	//cmd := exec.Command("ansible-playbook", "release.yml", "--extra-vars", "@")
-	//cmd.Stdin = strings.NewReader("some input")
-	//var out bytes.Buffer
-	//cmd.Stdout = &out
-	//err := cmd.Run()
-	//if err != nil {
-	//	log.Fatal(err)
-	//}
-	//fmt.Printf("in all caps: %q\n", out.String())
+	curPath, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
 
+	cmd := exec.Command(
+		"ansible-playbook",
+		"-i", path.Join(curPath, "test/automated/ansible/inventory.local"),
+		"--extra-vars", "@"+path.Join(curPath, inventory),
+		path.Join(curPath, "test/automated/ansible/provision.yml"),
+	)
+
+	fmt.Println("Executing command: " + cmd.String())
+
+	var out, errOut bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+	err = cmd.Run()
+	if err != nil {
+		log.Fatal(errOut.String())
+	}
+	fmt.Printf("in all caps: %q\n", out.String())
+
+}
+
+func randStringRunes(n int) string {
+	b := make([]rune, n)
+	for i := range b {
+		b[i] = letterRunes[rand.Intn(len(letterRunes))]
+	}
+	return string(b)
 }
 
 type option struct {
