@@ -1,9 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
 	"gopkg.in/yaml.v2"
+	"io"
 	"io/ioutil"
 	"log"
 	"math/rand"
@@ -13,12 +13,25 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-//const instancesFile = "../../test/automated/ansible/group_vars/localhost/main.yml"
-const instancesFile = "/Users/rruizdegauna/src/nr-pub/infrastructure-agent/test/automated/ansible/group_vars/localhost/main.yml"
-const inventory = "test/automated/ansible/custom-instances.yml"
+const (
+	instancesFile = "test/automated/ansible/group_vars/localhost/main.yml"
+	inventory     = "test/automated/ansible/custom-instances.yml"
+	colorArm64    = "\033[32m"
+	colorAmd64    = "\033[34m"
+	colorReset    = "\033[0m"
+
+	colorRed    = "\033[31m"
+	colorGreen  = "\033[32m"
+	colorYellow = "\033[33m"
+	colorBlue   = "\033[34m"
+	colorPurple = "\033[35m"
+	colorCyan   = "\033[36m"
+	colorWhite  = "\033[37m"
+)
 
 type AnsibleGroupVars struct {
 	ProvisionHostPrefix string        `yaml:"provision_host_prefix"`
@@ -50,13 +63,13 @@ func main() {
 	}
 
 	for i := 0; i < len(opts)/2+1; i++ {
-		fmt.Print(opts[i].name)
+		fmt.Print(opts[i].Option())
 		if _, ok := opts[i+len(opts)/2]; ok {
-			fmt.Printf("        %s\n", opts[i+len(opts)/2].name)
+			fmt.Printf("        %s\n", opts[i+len(opts)/2].Option())
 		}
 	}
 
-	fmt.Print("Select one of numbers (or q to quit): ")
+	fmt.Printf("Select one of numbers (or %s to quit): ", colorizeRed("q"))
 
 	// get user input
 	var userInput string
@@ -64,8 +77,7 @@ func main() {
 	fmt.Scanln(&userInput)
 
 	if userInput == "q" {
-		fmt.Println("Have a nice day!")
-		os.Exit(0)
+		exit()
 	}
 
 	chosenAmiNumber, err := strconv.Atoi(userInput)
@@ -76,41 +88,35 @@ func main() {
 
 	// request for prefix
 	provisionHostPrefix := randStringRunes(4)
-	fmt.Printf("Enter a prefix for the boxes (empty for random): [%s] ", provisionHostPrefix)
+	fmt.Printf("Enter a prefix for the boxes (empty for random): [%s] ", colorizeYellow(provisionHostPrefix))
 	userInput = ""
 	fmt.Scanln(&userInput)
 	if userInput != "" {
 		provisionHostPrefix = userInput
 	}
-	user, err := user.Current()
+	u, err := user.Current()
 	if err != nil {
 		log.Fatalf(err.Error())
 	}
-	username := user.Username
-	hostname, err := os.Hostname()
-	if err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
-	provisionHostPrefix = fmt.Sprintf("%s-%s-%s", username, hostname, provisionHostPrefix)
+	provisionHostPrefix = fmt.Sprintf("%s-%s", u.Username, provisionHostPrefix)
 	// validate input
 
 	// confirm
 	fmt.Printf("Chosen AMI\n")
-	fmt.Printf("Os: %s\n", opts[chosenAmiNumber].os)
-	fmt.Printf("Arch: %s\n", opts[chosenAmiNumber].arch)
-	fmt.Printf("Prefix: %s\n", provisionHostPrefix)
+	fmt.Printf("Os: %s%s%s\n", colorPurple, opts[chosenAmiNumber].os, colorReset)
+	fmt.Printf("Arch: %s%s%s\n", opts[chosenAmiNumber].arch.color(), opts[chosenAmiNumber].arch, colorReset)
+	fmt.Printf("Prefix: %s%s%s\n", colorCyan, provisionHostPrefix, colorReset)
 	fmt.Printf("\n")
-	fmt.Printf("Is this right [(y)es / (n)o / (q)uit]: ")
+	fmt.Printf("Is this right [(%s)es / (%s)o / (%s)uit]: ",colorizeGreen("y"),colorizeYellow("n"), colorizeRed("q"))
 	userInput = ""
 	fmt.Scanln(&userInput)
 
-	if (userInput != "yes" && userInput != "y") || userInput == "q" {
-		os.Exit(0)
+	if (userInput != "" && userInput != "yes" && userInput != "y") || userInput == "q" {
+		exit()
 	}
 
 	// prepare ansible config (tmp list of hosts to create)
-	fmt.Printf("Preparing config for %s\n", opts[chosenAmiNumber].name)
+	fmt.Printf("Preparing config\n")
 
 	newConfig := AnsibleGroupVars{}
 	newConfig.ProvisionHostPrefix = provisionHostPrefix
@@ -124,8 +130,11 @@ func main() {
 		panic(err)
 	}
 
-	// execute ansible
-	fmt.Printf("Executing Ansible for %s\n", opts[chosenAmiNumber].name)
+	executeAnsible()
+}
+
+func executeAnsible(){
+	fmt.Printf("Executing Ansible\n")
 
 	curPath, err := os.Getwd()
 	if err != nil {
@@ -141,15 +150,32 @@ func main() {
 
 	fmt.Println("Executing command: " + cmd.String())
 
-	var out, errOut bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &errOut
+	var errStdout, errStderr error
+
+	stdoutIn, _ := cmd.StdoutPipe()
+	stderrIn, _ := cmd.StderrPipe()
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		fmt.Println("Printing output: " + cmd.String())
+		errStdout = copyAndCapture(os.Stdout, stdoutIn)
+
+		wg.Done()
+	}()
+	go func() {
+		fmt.Println("Printing error output: " + cmd.String())
+		errStderr = copyAndCapture(os.Stderr, stderrIn)
+
+		wg.Done()
+	}()
+
 	err = cmd.Run()
 	if err != nil {
-		log.Fatal(errOut.String())
+		log.Fatal(err)
 	}
-	fmt.Printf("in all caps: %q\n", out.String())
 
+	wg.Wait()
 }
 
 func randStringRunes(n int) string {
@@ -160,12 +186,29 @@ func randStringRunes(n int) string {
 	return string(b)
 }
 
+type architecture string
+
+func (a architecture) color() string {
+	if a == "amd64" {
+		return colorAmd64
+	}
+
+	return colorArm64
+}
+
 type option struct {
 	id       int
-	name     string
-	arch     string
+	arch     architecture
 	os       string
 	instance instanceDef
+}
+
+func (o option) FullName() string {
+	return ""
+}
+func (o option) Option() string {
+	optionFormat := "[%2d] %s%6s%s %18s"
+	return fmt.Sprintf(optionFormat, o.id, o.arch.color(), o.arch, colorReset, o.os)
 }
 
 type options map[int]option
@@ -180,31 +223,57 @@ func generateOptions(yamlContent []byte) (options, error) {
 		log.Fatal(err.Error())
 	}
 
-	optionFormat := "[%2d] %s%6s%s %18s"
-
-	colorGreen := "\033[32m"
-	colorBlue := "\033[34m"
-	colorReset := "\033[0m"
-
 	for i, instance := range groupVars.Instances {
 
 		arch := instance.Name[:strings.Index(instance.Name, ":")]
-		operationSystem := instance.Name[strings.Index(instance.Name, ":")+1:]
-
-		osColor := colorGreen
-
-		if arch == "amd64" {
-			osColor = colorBlue
-		}
+		opSystem := instance.Name[strings.Index(instance.Name, ":")+1:]
 
 		options[i] = option{
 			id:       i,
-			arch:     arch,
-			os:       operationSystem,
-			name:     fmt.Sprintf(optionFormat, i, osColor, arch, colorReset, operationSystem),
+			arch:     architecture(arch),
+			os:       opSystem,
 			instance: instance,
 		}
 	}
 
 	return options, nil
+}
+
+func colorizeRed(s string) string{
+	return fmt.Sprintf("%s%s%s", colorRed, s, colorReset)
+}
+
+func colorizeGreen(s string) string{
+	return fmt.Sprintf("%s%s%s", colorGreen, s, colorReset)
+}
+func colorizeYellow(s string) string{
+	return fmt.Sprintf("%s%s%s", colorYellow, s, colorReset)
+}
+
+func exit() {
+	fmt.Println("Have a nice day!")
+	os.Exit(0)
+}
+
+func copyAndCapture(w io.Writer, r io.Reader) error {
+	var out []byte
+	buf := make([]byte, 1024, 1024)
+	for {
+		n, err := r.Read(buf[:])
+		if n > 0 {
+			d := buf[:n]
+			out = append(out, d...)
+			_, err := w.Write(d)
+			if err != nil {
+				return err
+			}
+		}
+		if err != nil {
+			// Read returns io.EOF at the end of file, which is not an error for us
+			if err == io.EOF {
+				err = nil
+			}
+			return err
+		}
+	}
 }
